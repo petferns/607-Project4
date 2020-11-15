@@ -1,0 +1,256 @@
+---
+title: "DATA 607 Project 4: Document Classification"
+author: "Peter"
+date: "11/14/2020"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+For this project, you can start with a spam/ham dataset, then predict the class of new documents (either withheld from the training dataset or from another source such as your own spam folder).   One example corpus:   https://spamassassin.apache.org/old/publiccorpus/
+
+# Loading of the required libraries
+
+```{r warning=FALSE, error=FALSE}
+library("easypackages")
+library("stringr")
+library("stringi")
+library("readtext")
+library("tm")
+library("SnowballC")
+library("tidyr")
+library(wordcloud)
+library(R.utils)
+library(e1071)
+#libraries("knitr", "downloader", "R.utils", "tm", "wordcloud","topicmodels","SnowballC", "e1071", "data.table", "RMySQL","tidyverse", "tidyr", "dplyr", "stats", "quanteda","plyr", "class")
+
+```
+
+# Download the selected datasets. Unzip the files automatically and save in the working directory for further processing
+
+```{r warning=FALSE}
+url_spam <- "http://spamassassin.apache.org/old/publiccorpus/20050311_spam_2.tar.bz2"
+file_spam <- "20050311_spam_2.tar.bz2"
+file_spam2<-"20050311_spam_2.tar"
+
+url_ham <- "http://spamassassin.apache.org/old/publiccorpus/20030228_easy_ham.tar.bz2"
+file_ham <- "20030228_easy_ham.tar.bz2"
+file_ham2 <- "20030228_easy_ham.tar"
+
+download.file(url_spam, destfile= file_spam)
+download.file(url_ham, destfile=file_ham)
+bunzip2(file_spam)
+bunzip2(file_ham)
+untar(file_ham2, exdir="spamham")
+untar(file_spam2, exdir = "spamham")
+```
+
+# Set the spam and ham directory variables and get the directory contents
+
+```{r}
+spam_dir="spamham\\spam_2\\"
+ham_dir="spamham\\easy_ham\\"
+spam_docs=list.files(spam_dir)
+ham_docs=list.files(ham_dir)
+
+#Remove the cmds file
+spam_docs = spam_docs[which(spam_docs!="cmds")]
+ham_docs=ham_docs[which(ham_docs!="cmds")]
+
+```
+
+# Function to get Email body by neglecting the header
+
+```{r}
+get_email_body <- function(emailContent){
+  msge <- str_split(emailContent,"\n\n") %>% unlist()
+  body <- paste(msge[2:length(msge)], collapse=' ' )
+  return(body)
+}
+```
+
+# Read the spam mails
+
+```{r}
+msgContent<-NA
+for(i in 1:length(spam_docs))
+{
+  filepath<-paste0(spam_dir,spam_docs[i])  
+  emailContent <-suppressWarnings(warning(readtext(filepath)))
+  msg <- get_email_body(emailContent)
+  msg <- gsub("<.*?>", " ", msg)
+  eachMsg<- list(paste(msg, collapse="\n"))
+  msgContent = c(msgContent,eachMsg)
+  
+}
+
+spam<-as.data.frame(unlist(msgContent),stringsAsFactors = FALSE)
+spam$class<-"spam"
+colnames(spam)<-c("msg","class")
+
+```
+
+# Read the ham mails
+
+```{r}
+msgContent<-NA
+for(i in 1:length(ham_docs))
+{
+  filepath<-paste0(ham_dir,ham_docs[i])  
+  emailContent <-suppressWarnings(warning(readtext(filepath)))
+  msg <- get_email_body(emailContent)
+  msg <- gsub("<.*?>", " ", msg)
+  eachMsg<- list(paste(msg, collapse="\n"))
+  msgContent = c(msgContent,eachMsg)
+  
+}
+
+
+ham<-as.data.frame(unlist(msgContent),stringsAsFactors = FALSE)
+ham$class<-"ham"
+colnames(ham)<-c("msg","class")
+```
+
+# Merge the SAPM and HAM into one dataframe
+
+```{r}
+spam_ham<-rbind(spam,ham)
+
+#Lets verify the count
+
+nrow(spam)
+nrow(ham)
+nrow(spam_ham)
+```
+
+# Creating the Corpus and do the cleaning of the message body
+
+```{r}
+
+corpus <- VCorpus(VectorSource(spam_ham$msg))
+#Convert the content to lower case
+corpus <- tm_map(corpus, content_transformer(tolower))
+
+#Remove numbers from the message body
+corpus <- tm_map(corpus, removeNumbers)
+
+#Remove punctuation's
+corpus <- tm_map(corpus, removePunctuation)
+
+#Remove stop words
+corpus <- tm_map(corpus, removeWords, stopwords())
+
+#Stemming the word into its root word
+corpus <- tm_map(corpus, stemDocument)
+
+#Remove white spaces
+corpus <- tm_map(corpus, stripWhitespace)
+
+```
+
+# Document term Matrix
+
+```{r}
+mtx = DocumentTermMatrix(corpus)
+mtx = removeSparseTerms(mtx, 0.98)
+
+bagOfWords = data.frame(as.matrix(mtx))
+bagOfWords$outputType = spam_ham$class
+
+```
+
+# Wordcloud for SPAM mails
+
+
+```{r}
+spam_indices <- which(spam_ham$class == "spam")
+suppressWarnings(wordcloud(corpus[spam_indices], min.freq=40))
+```
+
+# Wordcloud for HAM mails
+
+
+```{r}
+ham_indices <- which(spam_ham$class == "ham")
+suppressWarnings(wordcloud(corpus[ham_indices], min.freq=40))
+```
+
+# Splitting the data into training and testing data
+
+I will take 70% for training and 30% for testing
+
+```{r}
+sample_size <- floor(0.70 * nrow(spam_ham))
+set.seed(123)
+train_index <- sample(seq_len(nrow(spam_ham)), size = sample_size)
+
+train_spam_ham <- spam_ham[train_index, ]
+test_spam_ham <- spam_ham[-train_index, ]
+
+spam_set<-subset(train_spam_ham,train_spam_ham$class == "spam")
+ham_set<-subset(train_spam_ham,train_spam_ham$class == "ham")
+
+train_email_corpus <- Corpus(VectorSource(train_spam_ham$msg))
+test_email_corpus <- Corpus(VectorSource(test_spam_ham$msg))
+
+#Convert the content to lower case
+train_email_corpus = tm_map(train_email_corpus, content_transformer(tolower))
+test_email_corpus = tm_map(test_email_corpus, content_transformer(tolower))
+
+#Remove numbers from the message body
+train_email_corpus = tm_map(train_email_corpus, removeNumbers)
+test_email_corpus = tm_map(test_email_corpus, removeNumbers)
+
+#Remove punctuation's
+train_email_corpus = tm_map(train_email_corpus, removePunctuation)
+test_email_corpus = tm_map(test_email_corpus, removePunctuation)
+
+#Remove stop words
+train_email_corpus = tm_map(train_email_corpus, removeWords, stopwords())
+test_email_corpus = tm_map(test_email_corpus, removeWords, stopwords())
+
+#Stemming the word into its root word
+train_email_corpus = tm_map(train_email_corpus, stemDocument)
+test_email_corpus = tm_map(test_email_corpus, stemDocument)
+
+#Remove white spaces
+train_email_corpus = tm_map(train_email_corpus, stripWhitespace)
+test_email_corpus = tm_map(test_email_corpus, stripWhitespace)
+
+#Create the DTM
+train_email_dtm <- DocumentTermMatrix(train_email_corpus)
+test_email_dtm <- DocumentTermMatrix(test_email_corpus)
+
+# count function
+convert_count <- function(x) {
+  y <- ifelse(x > 0, 1,0)
+  y <- factor(y, levels=c(0,1), labels=c("No", "Yes"))
+  y
+}
+
+train_data <- apply(train_email_dtm, 2, convert_count)
+test_data <- apply(test_email_dtm, 2, convert_count)
+```
+
+
+```{r}
+
+# Email classification
+classifier <- naiveBayes(train_data, factor(train_spam_ham$class))
+
+```
+
+# Predicting using the test data
+
+```{r}
+test_pred <- predict(classifier, newdata=test_data)
+
+table(test_pred, test_spam_ham$class)
+```
+
+
+
